@@ -170,23 +170,42 @@ class MarketDataProcessor:
         self.data['r_lower'] = self.data['r_mean'] - 2 * self.data['r_std']
         return self
     
-    def add_entry_price(self, halflife=51):
+    def add_entry_price(self, halflife=51, rsi_threshold=30, vol_window=20, vol_percentile=0.7, ma_window=50, slope_thresh=0.05):
         """
         For each entry (Label is 'BELOW 2 SD' or 'BELOW 3 SD'), 
-        record Entry_Price. Also add an empty Exit_Price column.
+        record Entry_Price if RSI < rsi_threshold, Volume is above vol_percentile of last vol_window bars,
+        and the long MA slope is flat (sideways regime).
         """
         label_col = 'Label'
         close_col = 'Close'
+        rsi_col = 'RSI'
+        vol_col = 'Volume'
 
         df = self.data
         df['Entry_Price'] = np.nan
         df['Exit_Price'] = np.nan
 
-        entries = df.index[df[label_col].isin(['BELOW 2 SD', 'BELOW 3 SD'])].tolist()
+        # Calculate rolling volume threshold
+        df['Vol_Thresh'] = df[vol_col].rolling(vol_window, min_periods=1).quantile(vol_percentile)
+
+        # Calculate long moving average and its slope
+        df['Long_MA'] = df[close_col].rolling(ma_window, min_periods=1).mean()
+        df['MA_Slope'] = df['Long_MA'].diff() / df['Long_MA'].shift(1)
+
+        # Trend filter: only allow if MA slope is "flat" (abs(slope) < slope_thresh)
+        trend_filter = df['MA_Slope'].abs() < slope_thresh
+
+        entries = df.index[
+            (df[label_col].isin(['BELOW 2 SD', 'BELOW 3 SD'])) &
+            (df[rsi_col] < rsi_threshold) &
+            (df[vol_col] > df['Vol_Thresh']) &
+            (trend_filter)
+        ].tolist()
 
         for entry_idx in entries:
             entry_price = df.at[entry_idx, close_col]
             df.at[entry_idx, 'Entry_Price'] = entry_price
 
+        df.drop(columns=['Vol_Thresh', 'Long_MA', 'MA_Slope'], inplace=True)
         self.data = df
         return self

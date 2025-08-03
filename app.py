@@ -1,16 +1,17 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 from fetcher import get_ohlcv
 from processor import MarketDataProcessor
 from charts import plot_stock_signals, plot_stock_subplots
 from metrices import PerformanceMetrics
-from backtest import backtest_mean_reversion
+from backtest import backtest_mean_reversion, backtest_mean_reversion_tp_sl
 
 st.set_page_config(page_title="Stock App", layout="wide")
 
 # Sidebar navigation
 st.sidebar.title("📂 Navigation")
-page = st.sidebar.radio("Select Page", ["Process Data", "Charts", "Performance"])
+page = st.sidebar.radio("Select Page", ["Process Data", "Charts", "Performance", "Backtest Strategy"])
 
 # Process Data Page
 if page == "Process Data":
@@ -20,8 +21,8 @@ if page == "Process Data":
         st.session_state['ticker'] = ""
     ticker = st.text_input("Enter Stock Ticker:", st.session_state['ticker']).upper()
     st.session_state['ticker'] = ticker
-    period = st.selectbox("Period", ["1d", "5d", "1mo", "2mo","3mo", "6mo", "1y","5y","max"], index=4)
-    interval = st.selectbox("Interval", ["1m", "5m", "15m", "1h", "4h", "1d", "1wk"], index=4)
+    period = st.selectbox("Period", ["1d", "5d", "1mo", "2mo","3mo", "6mo", "1y","5y","max"], index=6)
+    interval = st.selectbox("Interval", ["1m", "5m", "15m", "1h", "4h", "1d", "1wk"], index=5)
 
     if st.button("Fetch & Process Data"):
         raw_data = get_ohlcv(ticker, period, interval)
@@ -156,3 +157,56 @@ elif page == "Performance":
             st.info("No trades found for this strategy.")
     else:
         st.info("Please process data first and ensure the stock name is correct.")
+
+# Backtest Strategy Page
+elif page == "Backtest Strategy":
+    st.title("🔬 Backtest Strategy")
+
+    with st.form("backtest_form"):
+        ticker = st.session_state.get('ticker', '')
+        stock_name = st.text_input("Enter Stock Name for Backtest:", ticker).upper()
+        start_date = st.date_input("Start Date", value=datetime(2023, 1, 1))
+        end_date = st.date_input("End Date", value=datetime.today())
+        strategy = st.selectbox(
+            "Strategy",
+            ["Mean Reversion", "Mean Reversion Fixed Risk Reward"]
+        )
+        run_bt = st.form_submit_button("Run Backtest")
+
+    stock_data_dict = st.session_state.get('stock_data_dict', {})
+    if run_bt:
+        if stock_name in stock_data_dict:
+            df = stock_data_dict[stock_name]
+            # Remove timezone for comparison
+            if df.index.tz is not None:
+                df = df.copy()
+                df.index = df.index.tz_convert(None)
+            # Filter by date
+            df = df[(df.index >= pd.to_datetime(start_date)) & (df.index <= pd.to_datetime(end_date))]
+            st.write(f"Backtesting {strategy} on {stock_name} from {start_date} to {end_date}")
+
+            if strategy == "Mean Reversion":
+                trades_df, summary = backtest_mean_reversion(df, mean_col='m_half_51', tolerance=0.01)
+            elif strategy == "Mean Reversion Fixed Risk Reward":
+                trades_df, summary = backtest_mean_reversion_tp_sl(df, take_profit=0.04, stop_loss=0.07)
+            else:
+                trades_df, summary = pd.DataFrame(), {}
+
+            st.subheader("Performance Summary")
+            st.table(pd.DataFrame(summary, index=["Value"]).T)
+            st.subheader("Trade Log")
+            if not trades_df.empty:
+                # Only convert if not already datetime, otherwise this is a no-op
+                trades_df['Entry_Date'] = pd.to_datetime(trades_df['Entry_Date'])
+                trades_df['Exit_Date'] = pd.to_datetime(trades_df['Exit_Date'])
+                display_cols = [
+                    'Entry_Date', 'Entry_Price', 'Exit_Date', 'Exit_Price',
+                    'Return', 'Exit_Reason'
+                ]
+                display_cols = [col for col in display_cols if col in trades_df.columns]
+                trades_df = trades_df[display_cols]
+                st.dataframe(trades_df)
+            else:
+                st.info("No trades found for this strategy.")
+        else:
+            st.warning("Please process data for this stock first.")
