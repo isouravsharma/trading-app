@@ -170,7 +170,7 @@ class MarketDataProcessor:
         self.data['r_lower'] = self.data['r_mean'] - 2 * self.data['r_std']
         return self
     
-    def add_entry_price(self, halflife=51, rsi_threshold=30, vol_window=20, vol_percentile=0.7, ma_window=50, slope_thresh=0.05):
+    def add_entry_price(self, halflife=51, rsi_threshold=30, vol_window=20, vol_percentile=0.7, ma_window=50, slope_thresh=0.05, min_volume=0):
         """
         For each entry (Label is 'BELOW 2 SD' or 'BELOW 3 SD'), 
         record Entry_Price if RSI < rsi_threshold, Volume is above vol_percentile of last vol_window bars,
@@ -199,6 +199,7 @@ class MarketDataProcessor:
             (df[label_col].isin(['BELOW 2 SD', 'BELOW 3 SD'])) &
             (df[rsi_col] < rsi_threshold) &
             (df[vol_col] > df['Vol_Thresh']) &
+            (df[vol_col] > min_volume) &
             (trend_filter)
         ].tolist()
 
