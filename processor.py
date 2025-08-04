@@ -11,9 +11,22 @@ class MarketDataProcessor:
         self._validate()
 
     def _validate(self):
+        """Enhanced data validation"""
         required_cols = {'Open', 'High', 'Low', 'Close', 'Volume'}
         if not required_cols.issubset(self.data.columns):
             raise ValueError(f"Data must contain {required_cols}")
+        
+        # Check for NaN values
+        if self.data[list(required_cols)].isnull().any().any():
+            raise ValueError("Data contains NaN values in required columns")
+        
+        # Verify price integrity
+        if not (self.data['High'] >= self.data['Low']).all():
+            raise ValueError("High prices must be >= Low prices")
+        
+        # Check for sufficient data
+        if len(self.data) < 100:  # Minimum required for calculations
+            raise ValueError("Insufficient data points. Need at least 100 bars.")
 
     def add_rsi(self, n=14):
         delta = self.data['Close'].diff()
@@ -124,35 +137,38 @@ class MarketDataProcessor:
         return self.data.copy()
 
     def add_half_life_signals(self, halflife=51, column='Close'):
-        """
-        Adds half-life mean, distance from mean, and SD-based signal labels.
-        """
+        """Vectorized half-life signal generation"""
         m_col = f'm_half_{halflife}'
         dist_col = 'Distance_From_Mean'
+        
+        # Vectorized calculations
         self.data[m_col] = self.data[column].ewm(halflife=halflife).mean()
         self.data[dist_col] = self.data[column] - self.data[m_col]
-
+        
         mean = self.data[dist_col].mean()
         std = self.data[dist_col].std()
-
-        def categorize(x):
-            if x >= mean + 3 * std:
-                return 'ABOVE 3 SD', 3
-            elif x <= mean - 3 * std:
-                return 'BELOW 3 SD', -3
-            elif x >= mean + 2 * std:
-                return 'ABOVE 2 SD', 2
-            elif x <= mean - 2 * std:
-                return 'BELOW 2 SD', -2
-            elif x >= mean + 1 * std:
-                return 'ABOVE 1 SD', 1
-            elif x <= mean - 1 * std:
-                return 'BELOW 1 SD', -1
-            else:
-                return 'AT MEAN', 0
-
-        labels_levels = self.data[dist_col].apply(categorize)
-        self.data[['Label', 'SD_Level']] = pd.DataFrame(labels_levels.tolist(), index=self.data.index)
+        
+        # Vectorized categorization
+        conditions = [
+            self.data[dist_col] >= mean + 3 * std,
+            self.data[dist_col] <= mean - 3 * std,
+            self.data[dist_col] >= mean + 2 * std,
+            self.data[dist_col] <= mean - 2 * std,
+            self.data[dist_col] >= mean + std,
+            self.data[dist_col] <= mean - std
+        ]
+        
+        choices_label = [
+            'ABOVE 3 SD', 'BELOW 3 SD',
+            'ABOVE 2 SD', 'BELOW 2 SD',
+            'ABOVE 1 SD', 'BELOW 1 SD'
+        ]
+        
+        choices_level = [3, -3, 2, -2, 1, -1]
+        
+        self.data['Label'] = np.select(conditions, choices_label, default='AT MEAN')
+        self.data['SD_Level'] = np.select(conditions, choices_level, default=0)
+        
         return self
     
     def cummulative_returns(self, window=30):
@@ -170,43 +186,69 @@ class MarketDataProcessor:
         self.data['r_lower'] = self.data['r_mean'] - 2 * self.data['r_std']
         return self
     
-    def add_entry_price(self, halflife=51, rsi_threshold=30, vol_window=20, vol_percentile=0.7, ma_window=50, slope_thresh=0.05, min_volume=0):
+    def add_entry_price(
+        self, halflife=51, rsi_threshold=30, vol_window=20, vol_percentile=0.7,
+        ma_window=50, slope_thresh=0.05, min_volume=0
+    ):
         """
         For each entry (Label is 'BELOW 2 SD' or 'BELOW 3 SD'), 
         record Entry_Price if RSI < rsi_threshold, Volume is above vol_percentile of last vol_window bars,
         and the long MA slope is flat (sideways regime).
+        Also adds Stop_Loss (10% below Entry_Price) and Potential_Profit (mean value at entry).
         """
         label_col = 'Label'
         close_col = 'Close'
         rsi_col = 'RSI'
         vol_col = 'Volume'
+        mean_col = f'm_half_{halflife}'
 
         df = self.data
         df['Entry_Price'] = np.nan
         df['Exit_Price'] = np.nan
+        df['Stop_Loss'] = np.nan
+        df['Potential_Profit'] = np.nan
 
         # Calculate rolling volume threshold
         df['Vol_Thresh'] = df[vol_col].rolling(vol_window, min_periods=1).quantile(vol_percentile)
 
         # Calculate long moving average and its slope
-        df['Long_MA'] = df[close_col].rolling(ma_window, min_periods=1).mean()
-        df['MA_Slope'] = df['Long_MA'].diff() / df['Long_MA'].shift(1)
+        df['MA_Long'] = df[close_col].rolling(ma_window, min_periods=1).mean()
+        df['MA_Slope'] = df['MA_Long'].diff() / df['MA_Long'].shift(1)
 
-        # Trend filter: only allow if MA slope is "flat" (abs(slope) < slope_thresh)
-        trend_filter = df['MA_Slope'].abs() < slope_thresh
+        for i, row in df.iterrows():
+            if (
+                row[label_col] in ['BELOW 2 SD', 'BELOW 3 SD']
+                and row[rsi_col] < rsi_threshold
+                and row[vol_col] > row['Vol_Thresh']
+                and abs(row['MA_Slope']) < slope_thresh
+                and row[vol_col] > min_volume
+            ):
+                entry_price = row[close_col]
+                stop_loss = entry_price * 0.90  # 10% below entry
+                potential_profit = row[mean_col]  # mean value at entry
+                df.at[i, 'Entry_Price'] = entry_price
+                df.at[i, 'Stop_Loss'] = stop_loss
+                df.at[i, 'Potential_Profit'] = potential_profit
 
-        entries = df.index[
-            (df[label_col].isin(['BELOW 2 SD', 'BELOW 3 SD'])) &
-            (df[rsi_col] < rsi_threshold) &
-            (df[vol_col] > df['Vol_Thresh']) &
-            (df[vol_col] > min_volume) &
-            (trend_filter)
-        ].tolist()
-
-        for entry_idx in entries:
-            entry_price = df.at[entry_idx, close_col]
-            df.at[entry_idx, 'Entry_Price'] = entry_price
-
-        df.drop(columns=['Vol_Thresh', 'Long_MA', 'MA_Slope'], inplace=True)
+        # Clean up temp columns if needed
+        df.drop(['Vol_Thresh', 'MA_Long', 'MA_Slope'], axis=1, inplace=True, errors='ignore')
         self.data = df
+        return self
+    
+    def add_position_sizing(self, risk_per_trade=0.02, atr_multiple=2):
+        """
+        Calculate position sizes based on volatility (ATR)
+        risk_per_trade: fraction of capital to risk per trade (e.g., 0.02 = 2%)
+        atr_multiple: multiple of ATR for stop loss
+        """
+        self.add_atr()  # Ensure ATR is calculated
+        
+        def calculate_size(row, capital=100000):
+            stop_distance = row['ATR'] * atr_multiple
+            if stop_distance == 0:
+                return 0
+            dollar_risk = capital * risk_per_trade
+            return np.floor(dollar_risk / stop_distance)
+        
+        self.data['Position_Size'] = self.data.apply(calculate_size, axis=1)
         return self

@@ -2,3 +2,4 @@ Lets consider the account amount 100
 Duration 1 year
 Take 4 trade at a time. 
 compare the result with index fund. 
+Look Forward. 
